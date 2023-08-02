@@ -1,139 +1,104 @@
 def COLOR_MAP = [
-    'SUCCESS': 'good', 
-    'FAILURE': 'danger',
-    'UNSTABLE': 'danger'
+    'SUCCESS':'good',
+    'FAILURE':'danger'
 ]
-pipeline {
-  agent any
-  environment {
-    WORKSPACE = "${env.WORKSPACE}"
-    NEXUS_CREDENTIAL_ID = 'Nexus-Credential'
-    //NEXUS_USER = "$NEXUS_CREDS_USR"
-    //NEXUS_PASSWORD = "$Nexus-Token"
-    //NEXUS_URL = "172.31.18.62:8081"
-    //NEXUS_REPOSITORY = "maven_project"
-    //NEXUS_REPO_ID    = "maven_project"
-    //ARTVERSION = "${env.BUILD_ID}"
-  }
-  tools {
-    maven 'localMaven'
-    jdk 'localJdk'
-  }
-  stages {
-    stage('Build') {
-      steps {
-        sh 'mvn clean package'
-      }
-      post {
-        success {
-          echo ' now Archiving '
-          archiveArtifacts artifacts: '**/*.war'
-        }
-      }
+
+pipeline{
+    agent any
+    tools{
+        jdk 'JDK'
+        maven 'Maven'
     }
-    stage('Unit Test'){
-        steps {
-            sh 'mvn test'
-        }
-    }
-    stage('Integration Test'){
-        steps {
-          sh 'mvn verify -DskipUnitTests'
-        }
-    }
-    stage ('Checkstyle Code Analysis'){
-        steps {
-            sh 'mvn checkstyle:checkstyle'
-        }
-        post {
-            success {
-                echo 'Generated Analysis Result'
+    stages{
+        stage('Git Checkout'){
+            steps{
+                git branch: 'ci-jenkins', url: 'https://github.com/Abionaraji/personally-project.git'
             }
         }
-    }
-    stage('SonarQube Inspection') {
-        steps {
-            withSonarQubeEnv('SonarQube') { 
-                withCredentials([string(credentialsId: 'SonarQube-Token', variable: 'SONAR_TOKEN')]) {
-                sh """
-                mvn sonar:sonar \
-                -Dsonar.projectKey=cicd-pipeline-project \
-                -Dsonar.host.url=http://172.31.23.58:9000 \
-                -Dsonar.login=$SONAR_TOKEN
-                """
+        stage('Build Maven'){
+            steps{
+                sh 'mvn clean install'
+            }
+        }
+        stage('Test Unit'){
+            steps{
+                sh 'mvn test'
+            }
+            post {
+                success {
+                    slackSend channel: '#ci-work',
+                    color: 'good',
+                    message: "UNIT TEST IS SUCCESS"
+                }
+                failure {
+                    slackSend channel: '#ci-work',
+                    color: 'danger',
+                    message: "UNIT TEST IS FAILED"
                 }
             }
         }
-    }
-    stage('SonarQube GateKeeper') {
-        steps {
-          timeout(time : 1, unit : 'HOURS'){
-          waitForQualityGate abortPipeline: true
-          }
-       }
-    }
-    stage("Nexus Artifact Uploader"){
-        steps{
-           nexusArtifactUploader(
-              nexusVersion: 'nexus3',
-              protocol: 'http',
-              nexusUrl: '172.31.16.85:8081',
-              groupId: 'webapp',
-              version: "${env.BUILD_ID}-${env.BUILD_TIMESTAMP}",
-              repository: 'maven-project-releases',  //"${NEXUS_REPOSITORY}",
-              credentialsId: "${NEXUS_CREDENTIAL_ID}",
-              artifacts: [
-                  [artifactId: 'webapp',
-                  classifier: '',
-                  file: "${WORKSPACE}/webapp/target/webapp.war",
-                  type: 'war']
-              ]
-           )
+        stage('Checkstyle Analysis'){
+            steps{
+                sh 'mvn checkstyle:checkstyle'
+            }
         }
-    }
-    stage('Deploy to Development Env') {
-        environment {
-            HOSTS = 'dev'
+        stage('Intergrated Testing'){
+            steps{
+                sh 'mvn verify -DiskipUnitTest'
+            }
+            post {
+                success {
+                    slackSend channel: '#ci-work',
+                    color: 'good',
+                    message: "INTEGRATED TESTING IS SUCCESS"
+                }
+                failure {
+                    slackSend channel: '#ci-work',
+                    color: 'danger',
+                    message: "INTEGRATED TESTING IS FAILED"
+                }
+            }
         }
-        steps {
-            withCredentials([usernamePassword(credentialsId: 'Ansible-Credential', passwordVariable: 'PASSWORD', usernameVariable: 'USER_NAME')]) {
-                sh "ansible-playbook -i ${WORKSPACE}/ansible-config/aws_ec2.yaml ${WORKSPACE}/deploy.yaml --extra-vars \"ansible_user=$USER_NAME ansible_password=$PASSWORD hosts=tag_Environment_$HOSTS workspace_path=$WORKSPACE\""
+        stage('Sonarqube Analysis'){
+            steps{
+                withSonarQubeEnv(installationName: 'SonarQube', credentialsId: 'jenkins-sonar') {
+                    sh 'mvn sonar:sonar'
+                }
+            }
+        }
+        stage('Quality Gate Status'){
+            steps{
+                waitForQualityGate abortPipeline: true, credentialsId: 'jenkins-sonar'
+            }
+        }
+        stage('Upload War into Nexus'){
+            steps{
+                nexusArtifactUploader artifacts: 
+                [
+                    [
+                        artifactId: 'spring-web', 
+                        classifier: '', 
+                        file: 'target/vprofile-v2.war', 
+                        type: 'war'
+                        ]
+                    ], 
+                    credentialsId: 'nexus-jenkis', 
+                    groupId: 'production', 
+                    nexusUrl: '54.172.243.16:8081', 
+                    nexusVersion: 'nexus3', 
+                    protocol: 'http', 
+                    repository: 'vpro-maven', 
+                    version: 'v2'
             }
         }
     }
-    stage('Deploy to Staging Env') {
-        environment {
-            HOSTS = 'stage'
-        }
-        steps {
-            withCredentials([usernamePassword(credentialsId: 'Ansible-Credential', passwordVariable: 'PASSWORD', usernameVariable: 'USER_NAME')]) {
-                sh "ansible-playbook -i ${WORKSPACE}/ansible-config/aws_ec2.yaml ${WORKSPACE}/deploy.yaml --extra-vars \"ansible_user=$USER_NAME ansible_password=$PASSWORD hosts=tag_Environment_$HOSTS workspace_path=$WORKSPACE\""
-            }
+    post {
+        always{
+            echo 'slack notifications'
+            slackSend channel: '#ci-work',
+            color: COLOR_MAP[currentBuild.currentResult],
+            message: "*${currentBuild.currentResult}:* Job name ${env.JOB_NAME} build ${env.BUILD_NUMBER} time ${env.BUILD_TIMESTAMP} \n More info at: ${BUILD_URL}"
         }
     }
-    stage('Quality Assurance Approval') {
-        steps {
-            input('Do you want to proceed?')
-        }
-    }
-    stage('Deploy to Production Env') {
-        environment {
-            HOSTS = 'prod'
-        }
-        steps {
-            withCredentials([usernamePassword(credentialsId: 'Ansible-Credential', passwordVariable: 'PASSWORD', usernameVariable: 'USER_NAME')]) {
-                sh "ansible-playbook -i ${WORKSPACE}/ansible-config/aws_ec2.yaml ${WORKSPACE}/deploy.yaml --extra-vars \"ansible_user=$USER_NAME ansible_password=$PASSWORD hosts=tag_Environment_$HOSTS workspace_path=$WORKSPACE\""
-            }
-         }
-      }
-   }
-  post {
-    always {
-        echo 'Slack Notifications.'
-        slackSend channel: '#cicd-pipeline-project-alerts', //update and provide your channel name
-        color: COLOR_MAP[currentBuild.currentResult],
-        message: "*${currentBuild.currentResult}:* Job Name '${env.JOB_NAME}' build ${env.BUILD_NUMBER} \n Build Timestamp: ${env.BUILD_TIMESTAMP} \n Project Workspace: ${env.WORKSPACE} \n More info at: ${env.BUILD_URL}"
-    }
-  }
 }
 
